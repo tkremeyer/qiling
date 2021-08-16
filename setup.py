@@ -19,7 +19,8 @@ requirements = [
     "python-registry>=1.3.1",
     "keystone-engine>=0.9.2",
     "pyelftools>=0.26",
-    "gevent>=20.9.0"
+    "gevent>=20.9.0",
+    "apysetschema @ git+https://github.com/tkremeyer/apysetschema.git#egg=apysetschema"
 ]
 
 with open("README.md", "r", encoding="utf-8") as ld:

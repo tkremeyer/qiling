@@ -16,6 +16,9 @@ from qiling.os.windows.utils import *
 from qiling.os.windows.structs import *
 from .loader import QlLoader, Image
 
+from apysetschema.apisetschema import ApiSetSchema
+
+
 class QlPeCacheEntry:
     def __init__(self, ba: int, data: bytearray, cmdlines: Sequence, import_symbols: Mapping, import_table: Mapping):
         self. ba = ba
@@ -57,6 +60,7 @@ class Process():
 
     def __init__(self, ql: Qiling):
         self.ql = ql
+        self.apisetmapping = None
 
     def align(self, size: int, unit: int) -> int:
         return (size // unit + (1 if size % unit else 0)) * unit
@@ -138,6 +142,10 @@ class Process():
                 image_base = self.ql.mem.find_free_space(image_size, minaddr=image_base, align=0x10000)
                 self.ql.log.debug(f'DLL preferred base address is taken, loading to: {image_base:#x}')
 
+            # If the DLL could not be loaded to its preferred base address, we need to relocate it.
+            if image_base != dll.OPTIONAL_HEADER.ImageBase:
+                dll.relocate_image(image_base)
+
             cmdlines = []
             import_symbols = {}
             import_table = {}
@@ -193,10 +201,76 @@ class Process():
         # add DLL to coverage images
         self.images.append(Image(dll_base, dll_base + dll_len, path))
 
+        if dll.OPTIONAL_HEADER.DATA_DIRECTORY[pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_IMPORT']].VirtualAddress != 0:
+            for entry in dll.DIRECTORY_ENTRY_IMPORT:
+                imp_dll_name = str(entry.dll.lower(), 'utf-8', 'ignore')
+                imp_dll_name = self.resolve_apiset_to_dll(imp_dll_name)
+                self.ql.log.info(f"Loading DLL {imp_dll_name} as a dependency of {dll_name}")
+                self.load_dll(imp_dll_name.encode('utf-8'), driver)
+                for imp in entry.imports:
+                    if imp.name:
+                        try:
+                            addr = self.import_address_table[imp_dll_name][imp.name]
+                        except KeyError:
+                            self.ql.log.debug(f"Error in loading function {imp.name.decode} from DLL {imp_dll_name} while loading DLL {dll_name}")
+                    else:
+                        addr = self.import_address_table[imp_dll_name][imp.ordinal]
+
+                    if self.ql.archtype == QL_ARCH.X86:
+                        address = self.ql.pack32(addr)
+                    else:
+                        address = self.ql.pack64(addr)
+                    self.ql.mem.write(imp.address, address)
+
         self.ql.log.info(f'Done with loading {path}')
 
         return dll_base
 
+    def resolve_apiset_to_dll(self, dll_name: str) -> str:
+        dll_prefix = dll_name.rsplit('.', 1)[0]
+        apisetmapping = self.get_apisetmapping()
+
+        # Figure out if the apiset is defined by apisetschema.dll
+        apiset_name =  None
+        if dll_prefix in apisetmapping:
+            # The list might contain multiple values (in practice, 1 or 2).
+            # Unsure if we have to take the first / second one if there are 2.
+            apiset_name = dll_prefix
+        # In some apiset versions, the prefix "api-" or "ext-" is dropped in apisetschema.dll.
+        elif "-" in dll_prefix:
+            dll_prefix_without_first_part = dll_prefix.split('-', 1)[1]
+            if dll_prefix_without_first_part in apisetmapping:
+                apiset_name = dll_prefix_without_first_part
+
+        # apiset is defined in apisetschema.dll
+        if apiset_name:
+            # The apiset maps to a DLL (mapped DLL has to be loaded)
+            if apisetmapping[apiset_name][0]:
+                return apisetmapping[apiset_name][0]
+            # The apiset does not map to any DLL (unsure, but try to use the original DLL name here)
+            else:
+                self.ql.log.warning(f"Contract {dll_name} is defined in apisetschema, but not available on this system.")
+                return dll_name
+        # apiset is not defined in apisetschema.dll (original DLL name has to be used)
+        else:
+            return dll_name
+
+    def get_apisetmapping(self) -> Optional[dict]:
+        """
+        Loads the ApiSetSchema mapping on demand, if not yet loaded. Returns it.
+        """
+        if self.apisetmapping is None:
+            apisetschema_dll = os.path.join(self.ql.rootfs, "Windows", "System32", "apisetschema.dll")
+            if not os.path.isfile(apisetschema_dll):
+                self.apisetmapping = dict()
+                self.ql.log.warning("apisetschema.dll was not found. Apisets will not be mapped to their corresponding DLLs.")
+                return self.apisetmapping
+            self.ql.log.info("Loading ApiSetSchema")
+            apisetschema = ApiSetSchema(apisetschema_dll)
+            self.apisetmapping = dict()
+            for entry in apisetschema.entries:
+                self.apisetmapping[entry.name] = [v.value for v in entry.values]
+        return self.apisetmapping
 
     def _alloc_cmdline(self, wide):
         addr = self.ql.os.heap.alloc(len(self.cmdline) * (2 if wide else 1))
