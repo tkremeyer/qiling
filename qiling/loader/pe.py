@@ -60,7 +60,6 @@ class Process():
 
     def __init__(self, ql: Qiling):
         self.ql = ql
-        self.apisetmapping = None
 
     def align(self, size: int, unit: int) -> int:
         return (size // unit + (1 if size % unit else 0)) * unit
@@ -233,8 +232,6 @@ class Process():
         # Figure out if the apiset is defined by apisetschema.dll
         apiset_name =  None
         if dll_prefix in apisetmapping:
-            # The list might contain multiple values (in practice, 1 or 2).
-            # Unsure if we have to take the first / second one if there are 2.
             apiset_name = dll_prefix
         # In some apiset versions, the prefix "api-" or "ext-" is dropped in apisetschema.dll.
         elif "-" in dll_prefix:
@@ -245,8 +242,8 @@ class Process():
         # apiset is defined in apisetschema.dll
         if apiset_name:
             # The apiset maps to a DLL (mapped DLL has to be loaded)
-            if apisetmapping[apiset_name][0]:
-                return apisetmapping[apiset_name][0]
+            if apisetmapping[apiset_name][-1]:
+                return apisetmapping[apiset_name][-1]
             # The apiset does not map to any DLL (unsure, but try to use the original DLL name here)
             else:
                 self.ql.log.warning(f"Contract {dll_name} is defined in apisetschema, but not available on this system.")
@@ -551,6 +548,7 @@ class QlLoaderPE(QlLoader, Process):
         self.import_symbols = {}
         self.export_symbols = {}
         self.import_address_table = {}
+        self.apisetmapping = None
         self.ldr_list = []
         self.pe_image_address = 0
         self.pe_image_address_size = 0
